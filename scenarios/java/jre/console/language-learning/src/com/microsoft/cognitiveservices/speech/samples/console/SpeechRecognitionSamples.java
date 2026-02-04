@@ -29,6 +29,10 @@ import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
+import jakarta.json.JsonStructure;
+import jakarta.json.JsonWriter;
+import jakarta.json.JsonWriterFactory;
+import jakarta.json.stream.JsonGenerator;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.HttpURLConnection;
@@ -36,6 +40,8 @@ import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.UUID;
 
 import com.github.difflib.DiffUtils;
@@ -44,11 +50,49 @@ import com.github.difflib.patch.AbstractDelta;
 import com.github.difflib.patch.DeltaType;
 import com.github.difflib.patch.Patch;
 
+import io.github.cdimascio.dotenv.Dotenv;
+
 import com.microsoft.cognitiveservices.speech.*;
 import com.microsoft.cognitiveservices.speech.audio.*;
 
 @SuppressWarnings("resource") // scanner
 public class SpeechRecognitionSamples {
+
+    // Load environment variables from .env file
+    private static final Dotenv dotenv = Dotenv.configure().ignoreIfMissing().load();
+    
+    private static String getSubscriptionKey() {
+        return dotenv.get("SPEECH_SUBSCRIPTION_KEY", "YourSubscriptionKey");
+    }
+    
+    private static String getEndpointUrl() {
+        return dotenv.get("SPEECH_ENDPOINT_URL", "https://westus.api.cognitive.microsoft.com/");
+    }
+    
+    private static String getRegion() {
+        return dotenv.get("SPEECH_REGION", "westus");
+    }
+
+    // Pretty-print a JSON string safely; falls back to raw on error
+    private static String prettyJson(String rawJson) {
+        try {
+            JsonReader reader = Json.createReader(new StringReader(rawJson));
+            JsonStructure structure = reader.read();
+            reader.close();
+
+            Map<String, Object> config = new HashMap<>();
+            config.put(JsonGenerator.PRETTY_PRINTING, true);
+            JsonWriterFactory factory = Json.createWriterFactory(config);
+
+            java.io.StringWriter sw = new java.io.StringWriter();
+            JsonWriter writer = factory.createWriter(sw);
+            writer.write(structure);
+            writer.close();
+            return sw.toString();
+        } catch (Exception ex) {
+            return rawJson;
+        }
+    }
 
     // The Source to stop recognition.
     private static Semaphore stopRecognitionSemaphore;
@@ -57,12 +101,11 @@ public class SpeechRecognitionSamples {
     // See more information at https://aka.ms/csspeech/pa
     public static void pronunciationAssessmentWithMicrophoneAsync()
             throws ExecutionException, InterruptedException, URISyntaxException {
-        // subscription key and endpoint URL. Replace with your own subscription key
-        // and endpoint URL.
-        SpeechConfig config = SpeechConfig.fromEndpoint(new URI("YourEndpointUrl"), "YourSubscriptionKey");
+        // subscription key and endpoint URL loaded from .env file
+        SpeechConfig config = SpeechConfig.fromEndpoint(new URI(getEndpointUrl()), getSubscriptionKey());
 
         // Replace the language with your language in BCP-47 format, e.g., en-US.
-        String lang = "en-US";
+        String lang = "zh-CN";
 
         // The pronunciation assessment service has a longer default end silence timeout
         // (5 seconds) than normal STT
@@ -109,6 +152,11 @@ public class SpeechRecognitionSamples {
                 // StartContinuousRecognitionAsync() instead.
                 SpeechRecognitionResult result = recognizer.recognizeOnceAsync().get();
 
+                // Print raw JSON result for debugging (pretty-printed)
+                String jsonResult = result.getProperties().getProperty(PropertyId.SpeechServiceResponse_JsonResult);
+                System.out.println("\n--- Raw JSON Response ---");
+                System.out.println(prettyJson(jsonResult));
+                
                 // Checks result.
                 if (result.getReason() == ResultReason.RecognizedSpeech) {
                     System.out.println("RECOGNIZED: Text=" + result.getText());
@@ -150,12 +198,11 @@ public class SpeechRecognitionSamples {
     // See more information at https://aka.ms/csspeech/pa
     public static void pronunciationAssessmentWithPushStream()
             throws InterruptedException, IOException, ExecutionException, URISyntaxException {
-        // subscription key and endpoint URL. Replace with your own subscription key
-        // and endpoint URL.
-        SpeechConfig config = SpeechConfig.fromEndpoint(new URI("YourEndpointUrl"), "YourSubscriptionKey");
+        // subscription key and endpoint URL loaded from .env file
+        SpeechConfig config = SpeechConfig.fromEndpoint(new URI(getEndpointUrl()), getSubscriptionKey());
 
         // Replace the language with your language in BCP-47 format, e.g., en-US.
-        String lang = "en-US";
+        String lang = "zh-CN";
 
         // Set audio format
         long samplesPerSecond = 16000;
@@ -190,6 +237,57 @@ public class SpeechRecognitionSamples {
                         pronunciationResult.getFluencyScore()));
                 long resultReceivedTime = System.currentTimeMillis();
                 System.out.println(String.format("Latency: %d ms", resultReceivedTime - lastAudioUploadedTime[0]));
+
+                // Print raw JSON result for debugging (pretty-printed)
+                String RawJsonResult = e.getResult().getProperties().getProperty(PropertyId.SpeechServiceResponse_JsonResult);
+                System.out.println("\n--- Raw JSON Response ---");
+                System.out.println(prettyJson(RawJsonResult));
+
+                // Get word-level details from the JSON response
+                String jsonResult = e.getResult().getProperties()
+                        .getProperty(PropertyId.SpeechServiceResponse_JsonResult);
+                System.out.println("\n--- Word-level Details ---");
+
+                JsonReader jsonReader = Json.createReader(new StringReader(jsonResult));
+                JsonObject jsonObject = jsonReader.readObject();
+                jsonReader.close();
+
+                JsonArray nBestArray = jsonObject.getJsonArray("NBest");
+                if (nBestArray != null && nBestArray.size() > 0) {
+                    JsonObject nBest = nBestArray.getJsonObject(0);
+                    JsonArray wordsArray = nBest.getJsonArray("Words");
+
+                    if (wordsArray != null) {
+                        for (int i = 0; i < wordsArray.size(); i++) {
+                            JsonObject wordObj = wordsArray.getJsonObject(i);
+                            String word = wordObj.getString("Word");
+                            JsonObject pronAssessment = wordObj.getJsonObject("PronunciationAssessment");
+
+                            double accuracyScore = pronAssessment.getJsonNumber("AccuracyScore").doubleValue();
+                            String errorType = pronAssessment.getString("ErrorType");
+
+                            System.out.println(String.format("  Word: %s", word));
+                            System.out.println(String.format("    Accuracy Score: %.1f, Error Type: %s", accuracyScore, errorType));
+
+                            // Print phoneme-level details if available
+                            JsonArray phonemes = wordObj.getJsonArray("Phonemes");
+                            if (phonemes != null && phonemes.size() > 0) {
+                                System.out.println("    Phonemes:");
+                                for (int j = 0; j < phonemes.size(); j++) {
+                                    JsonObject phoneme = phonemes.getJsonObject(j);
+                                    String phonemeText = phoneme.getString("Phoneme");
+                                    JsonObject phonemePronAssessment = phoneme.getJsonObject("PronunciationAssessment");
+                                    double phonemeAccuracy = phonemePronAssessment.getJsonNumber("AccuracyScore").doubleValue();
+                                    System.out.println(String.format("      [%s] Accuracy: %.1f", phonemeText, phonemeAccuracy));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Also print the raw JSON for debugging
+                System.out.println("\n--- Raw JSON Response ---");
+                System.out.println(prettyJson(jsonResult));
             } else if (e.getResult().getReason() == ResultReason.NoMatch) {
                 System.out.println("NOMATCH: Speech could not be recognized.");
             }
@@ -216,7 +314,19 @@ public class SpeechRecognitionSamples {
             System.out.println("\n    Session stopped event.");
         });
 
-        String referenceText = "Hello world";
+        // Ask user whether to use reference text
+        System.out.println("Use reference text? (0 = No, 1 = Yes)");
+        System.out.print("> ");
+        int useRefText = new Scanner(System.in).nextInt();
+        
+        String referenceText = "";
+        if (useRefText == 1) {
+            referenceText = "手机号码";
+            System.out.println("Using reference text: " + referenceText);
+        } else {
+            System.out.println("No reference text (unscripted mode)");
+        }
+        
         // Create pronunciation assessment config, set grading system, granularity and
         // if enable miscue based on your requirement.
         PronunciationAssessmentConfig pronunciationConfig = new PronunciationAssessmentConfig(referenceText,
@@ -233,9 +343,9 @@ public class SpeechRecognitionSamples {
         System.out.println("Assessing...");
         Future<SpeechRecognitionResult> resultFuture = recognizer.recognizeOnceAsync();
 
-        // Replace with your own audio file name.
         // The input stream the sample will read from.
-        InputStream inputStream = new FileInputStream("YourAudioFile.wav");
+        InputStream inputStream = new FileInputStream("手机.wav");
+        // InputStream inputStream = new FileInputStream("手机号码.wav");
 
         // Arbitrary buffer size.
         byte[] readBuffer = new byte[4096];
@@ -278,9 +388,8 @@ public class SpeechRecognitionSamples {
     // See more information at https://aka.ms/csspeech/pa
     public static void pronunciationAssessmentConfiguredWithJson()
             throws ExecutionException, InterruptedException, URISyntaxException {
-        // subscription key and endpoint URL. Replace with your own subscription key
-        // and endpoint URL.
-        SpeechConfig config = SpeechConfig.fromEndpoint(new URI("YourEndpointUrl"), "YourSubscriptionKey");
+        // subscription key and endpoint URL loaded from .env file
+        SpeechConfig config = SpeechConfig.fromEndpoint(new URI(getEndpointUrl()), getSubscriptionKey());
 
         // Replace the language with your language in BCP-47 format, e.g., en-US.
         String lang = "en-US";
@@ -502,9 +611,8 @@ public class SpeechRecognitionSamples {
     // See more information at https://aka.ms/csspeech/pa
     public static void pronunciationAssessmentContinuousWithFile()
             throws ExecutionException, InterruptedException, URISyntaxException, IOException {
-        // subscription key and endpoint URL. Replace with your own subscription key
-        // and endpoint URL.
-        SpeechConfig config = SpeechConfig.fromEndpoint(new URI("YourEndpointUrl"), "YourSubscriptionKey");
+        // subscription key and endpoint URL loaded from .env file
+        SpeechConfig config = SpeechConfig.fromEndpoint(new URI(getEndpointUrl()), getSubscriptionKey());
 
         // You can adjust the segmentation silence timeout based on your real scenario.
         config.setProperty(PropertyId.Speech_SegmentationSilenceTimeoutMs, "1500");
@@ -778,8 +886,8 @@ public class SpeechRecognitionSamples {
     // https://learn.microsoft.com/azure/ai-services/speech-service/rest-speech-to-text-short
     public static void pronunciationAssessmentWithRestApi() throws Exception {
 
-        String serviceRegion = "YourSubscriptionRegion";
-        String serviceKey = "YourSubscriptionKey";
+        String serviceRegion = getRegion();
+        String serviceKey = getSubscriptionKey();
 
         // Build pronunciation assessment parameters
         String locale = "en-US";
